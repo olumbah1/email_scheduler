@@ -19,3 +19,22 @@ PostgreSQL
 Redis
 Gmail account with App Password
 Telex.im account
+
+
+# Usage
+Telex.im Commands
+Schedule an Email
+/schedule "Your message here" to recipient@email.com at 2pm with header "Subject Line"
+Examples:
+/schedule "Don't forget the meeting!" to john@example.com at 9am with header "Meeting Reminder"
+/schedule "Happy Birthday!" to mom@example.com at 7am every birthday with header "Birthday Wishes"
+/schedule "Monthly report check-in" to team@example.com at 10am monthly with header "Monthly Update"
+Recurrence Options:
+
+daily - Every day
+weekly - Every week
+monthly - Every month
+yearly - Every year
+every birthday - On birthday
+every anniversary - On anniversary date
+employment - Employment anniversary

@@ -1,0 +1,24 @@
+{
+  "active": true,
+  "category": "utilities",
+  "description": "An AI agent that schedules emails for you",
+  "id": "scheduled-email-agent",
+  "long_description": "Schedule emails with natural language commands, recurring schedules, custom headers, and friendly conversation. Say 'hi', 'how are you', or use /schedule to book emails.",
+  "name": "scheduled_email_agent",
+  "nodes": [
+    {
+      "id": "email_agent",
+      "name": "email agent",
+      "parameters": {},
+      "position": [816, -112],
+      "type": "a2a/custom-a2a-node",
+      "typeVersion": 1,
+      "url": "https://your-railway-domain.com/api/telex/webhook/"
+    }
+  ],
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "short_description": "Schedule emails with AI"
+}
