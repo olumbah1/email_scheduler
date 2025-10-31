@@ -7,14 +7,17 @@ from pytz import timezone as pytz_timezone
 from datetime import datetime, timedelta
 import re
 import json
+
 from .models import ScheduledEmail
 from .serializers import ScheduledEmailSerializer
 from .tasks import send_scheduled_email
 
 LAGOS_TZ = pytz_timezone('Africa/Lagos')
 
+
 class UserLoginView(APIView):
     """User login endpoint"""
+    
     def post(self, request):
         email = request.data.get('email')
         password = request.data.get('password')
@@ -43,6 +46,7 @@ class UserLoginView(APIView):
 
 class UserRegisterView(APIView):
     """User registration endpoint"""
+    
     def post(self, request):
         email = request.data.get('email')
         username = request.data.get('username')
@@ -119,13 +123,6 @@ class ParseEmailRequestView(APIView):
                 result['recurrence_type'] = recurrence
                 break
 
-        # Extract date/time
-        time_patterns = {
-            r'(\d{1,2}):(\d{2})\s*(am|pm)?': 'time',
-            r'(monday|tuesday|wednesday|thursday|friday|saturday|sunday)': 'day',
-            r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})': 'date',
-        }
-
         # Simple time extraction
         time_match = re.search(r'(\d{1,2}):(\d{2})\s*(am|pm)?', text)
         if time_match:
@@ -147,7 +144,7 @@ class ParseEmailRequestView(APIView):
 
             result['scheduled_time'] = scheduled
 
-        # Extract subject (first few words or before "send")
+        # Extract subject (first few words)
         if not result['subject']:
             words = text.split()[:5]
             result['subject'] = ' '.join(words)[:255]
@@ -198,6 +195,7 @@ class ScheduleEmailView(APIView):
     """Schedule an email"""
 
     def post(self, request):
+        """Schedule an email"""
         recipient_email = request.data.get('recipient_email')
         subject = request.data.get('subject', 'Scheduled Message')
         content = request.data.get('content')
@@ -208,8 +206,14 @@ class ScheduleEmailView(APIView):
         if not all([recipient_email, content, scheduled_time_str]):
             return Response({
                 'status': 'error',
-                'message': 'Missing required fields'
+                'message': 'Missing required fields: recipient_email, content, scheduled_time'
             }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Get or create user from recipient email
+        user, _ = User.objects.get_or_create(
+            email=recipient_email,
+            defaults={'username': recipient_email.split('@')[0]}
+        )
 
         try:
             scheduled_time = datetime.fromisoformat(scheduled_time_str)
@@ -220,36 +224,50 @@ class ScheduleEmailView(APIView):
                 'message': 'Invalid datetime format. Use ISO format: 2025-11-07T14:00:00'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        email = ScheduledEmail.objects.create(
-            user=request.user,
-            recipient_email=recipient_email,
-            subject=subject,
-            content=content,
-            email_header=email_header,
-            scheduled_time=scheduled_time,
-            recurrence_type=recurrence_type,
-            next_send=scheduled_time
-        )
+        try:
+            email = ScheduledEmail.objects.create(
+                user=user,
+                recipient_email=recipient_email,
+                subject=subject,
+                content=content,
+                email_header=email_header,
+                scheduled_time=scheduled_time,
+                recurrence_type=recurrence_type,
+                next_send=scheduled_time
+            )
 
-        # Schedule the task
-        send_scheduled_email.apply_async(
-            args=[email.id],
-            eta=scheduled_time
-        )
+            # Schedule task with Celery
+            send_scheduled_email.apply_async(
+                args=[email.id],
+                eta=scheduled_time
+            )
 
-        return Response({
-            'status': 'success',
-            'email_id': email.id,
-            'message': f'Email scheduled for {scheduled_time.strftime("%A, %B %d at %I:%M %p %Z")}',
-            'recipient': recipient_email
-        }, status=status.HTTP_201_CREATED)
+            return Response({
+                'status': 'success',
+                'email_id': email.id,
+                'message': f'✅ Email scheduled for {scheduled_time.strftime("%A, %B %d at %I:%M %p %Z")}',
+                'recipient': recipient_email
+            }, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            return Response({
+                'status': 'error',
+                'message': f'Error scheduling email: {str(e)}'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 
 class ListScheduledEmailsView(APIView):
-    """List all scheduled emails for user"""
+    """List all scheduled emails"""
 
     def get(self, request):
-        emails = ScheduledEmail.objects.filter(user=request.user)
+        # Get recipient_email from query params or request data
+        recipient_email = request.query_params.get('recipient_email') or request.data.get('recipient_email')
+        
+        if recipient_email:
+            emails = ScheduledEmail.objects.filter(recipient_email=recipient_email, is_active=True)
+        else:
+            emails = ScheduledEmail.objects.filter(is_active=True)
+
         serializer = ScheduledEmailSerializer(emails, many=True)
         return Response({
             'status': 'success',
@@ -263,15 +281,20 @@ class CancelScheduledEmailView(APIView):
 
     def delete(self, request, email_id):
         try:
-            email = ScheduledEmail.objects.get(id=email_id, user=request.user)
+            email = ScheduledEmail.objects.get(id=email_id)
             email.is_active = False
             email.save()
             return Response({
                 'status': 'success',
-                'message': f'Email "{email.subject}" cancelled'
+                'message': f'✅ Email "{email.subject}" has been cancelled'
             }, status=status.HTTP_200_OK)
         except ScheduledEmail.DoesNotExist:
             return Response({
                 'status': 'error',
-                'message': 'Email not found'
+                'message': '❌ Email not found'
             }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({
+                'status': 'error',
+                'message': f'Error cancelling email: {str(e)}'
+            }, status=status.HTTP_400_BAD_REQUEST)
