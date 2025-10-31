@@ -1,7 +1,6 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth.models import User
 from django.utils import timezone
 from pytz import timezone as pytz_timezone
@@ -70,7 +69,6 @@ class UserRegisterView(APIView):
 
 class ParseEmailRequestView(APIView):
     """Parse natural language email requests"""
-    permission_classes = [IsAuthenticated]
 
     def parse_natural_request(self, text):
         """
@@ -198,7 +196,6 @@ class ParseEmailRequestView(APIView):
 
 class ScheduleEmailView(APIView):
     """Schedule an email"""
-    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         recipient_email = request.data.get('recipient_email')
@@ -250,7 +247,6 @@ class ScheduleEmailView(APIView):
 
 class ListScheduledEmailsView(APIView):
     """List all scheduled emails for user"""
-    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         emails = ScheduledEmail.objects.filter(user=request.user)
@@ -264,7 +260,6 @@ class ListScheduledEmailsView(APIView):
 
 class CancelScheduledEmailView(APIView):
     """Cancel a scheduled email"""
-    permission_classes = [IsAuthenticated]
 
     def delete(self, request, email_id):
         try:
