@@ -2,10 +2,12 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.contrib.auth.models import User
-from datetime import datetime
+from datetime import datetime, timedelta
 from pytz import timezone as pytz_timezone
 import json
 import re
+import random
+import requests
 from .models import ScheduledEmail
 from .tasks import send_scheduled_email
 
@@ -18,87 +20,69 @@ class TelexWebhookView(APIView):
     Webhook URL: https://your-domain.com/api/telex/webhook/
     """
 
-    def verify_telex_signature(self, request):
-        """Verify webhook signature from Telex.im"""
-        # TODO: Implement signature verification if Telex provides
-        # For now, we'll accept all requests
-        return True
-
-    def parse_user_message(self, message_text):
-        """Parse user natural language input"""
-        return {
-            'content': message_text,
-            'has_email': '@' in message_text,
-        }
-
     def post(self, request):
-        """Handle incoming Telex webhook events"""
+        """Handle incoming Telex A2A webhook events"""
         
-        if not self.verify_telex_signature(request):
-            return Response({
-                'status': 'error',
-                'message': 'Invalid signature'
-            }, status=status.HTTP_401_UNAUTHORIZED)
-
         try:
             data = request.data
             
-            # Extract Telex event data
-            event_type = data.get('type')
-            message = data.get('message', {})
+            # Extract A2A protocol format
+            message_text = data.get('message', '').strip()
             sender_id = data.get('sender_id')
-            sender_email = data.get('sender_email')
             channel_id = data.get('channel_id')
+            sender_email = data.get('sender_email', f"user_{sender_id}@telex.im")
+            
+            if not message_text:
+                return Response({
+                    'status': 'success',
+                    'message': 'Empty message ignored'
+                }, status=status.HTTP_200_OK)
             
             # Get or create user
             user, _ = User.objects.get_or_create(
                 email=sender_email,
                 defaults={'username': sender_email.split('@')[0]}
             )
-
-            # Process different message types
-            if event_type == 'message':
-                return self.handle_message(user, message, channel_id)
             
+            # Process the message and get response
+            response_text = self.process_user_message(user, message_text, channel_id)
+            
+            # Return in A2A format
             return Response({
                 'status': 'success',
-                'message': 'Event processed'
+                'message': response_text,
+                'channel_id': channel_id
             }, status=status.HTTP_200_OK)
-
+            
         except Exception as e:
             return Response({
                 'status': 'error',
                 'message': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
 
-    def handle_message(self, user, message, channel_id):
-        """Handle text message from Telex"""
+    def process_user_message(self, user, text, channel_id):
+        """Route user message to appropriate handler"""
         
-        text = message.get('text', '').strip()
+        text = text.strip()
+        text_lower = text.lower()
         
-        if not text:
-            return Response({
-                'status': 'success',
-                'message': 'Empty message ignored'
-            }, status=status.HTTP_200_OK)
-
         # Command detection
-        if text.lower().startswith('/schedule'):
+        if text_lower.startswith('/schedule'):
             return self.process_schedule_command(user, text, channel_id)
-        elif text.lower().startswith('/list'):
-            return self.process_list_command(user, channel_id)
-        elif text.lower().startswith('/cancel'):
-            return self.process_cancel_command(user, text, channel_id)
-        elif text.lower().startswith('/help'):
-            return self.send_help_message(channel_id)
+        elif text_lower.startswith('/list'):
+            return self.process_list_command(user)
+        elif text_lower.startswith('/cancel'):
+            return self.process_cancel_command(user, text)
+        elif text_lower.startswith('/help'):
+            return self.get_help_message()
         else:
             # Natural language parsing
-            return self.process_natural_language(user, text, channel_id)
+            return self.process_natural_language(user, text)
 
     def process_schedule_command(self, user, text, channel_id):
         """
         Handle /schedule command
-        Example: /schedule "Hello world" to john@example.com at 2pm tomorrow with header "Birthday"
+        Example: /schedule "Hello world" to john@example.com at 2pm with header "Birthday"
         """
         
         # Extract components
@@ -107,8 +91,7 @@ class TelexWebhookView(APIView):
         header_match = re.search(r'header\s+["\']([^"\']+)["\']', text, re.IGNORECASE)
         
         if not content_match or not email_match:
-            response_text = "❌ Invalid format. Use: /schedule \"message\" to email@domain.com at TIME with header \"Header\""
-            return self.send_telex_message(channel_id, response_text)
+            return "❌ Invalid format.\nUse: /schedule \"message\" to email@domain.com at 2pm with header \"Header\""
 
         content = content_match.group(1)
         recipient_email = email_match.group(0)
@@ -117,8 +100,7 @@ class TelexWebhookView(APIView):
         # Parse time
         time_match = re.search(r'(\d{1,2}):?(\d{2})?\s*(am|pm)?', text, re.IGNORECASE)
         if not time_match:
-            response_text = "❌ Could not parse time. Use format: 2pm, 14:00, 2:30pm"
-            return self.send_telex_message(channel_id, response_text)
+            return "❌ Could not parse time. Use format: 2pm, 14:00, 2:30pm"
 
         hour = int(time_match.group(1))
         minute = int(time_match.group(2) or 0)
@@ -131,6 +113,10 @@ class TelexWebhookView(APIView):
 
         now = datetime.now(LAGOS_TZ)
         scheduled_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        # If time is in past, schedule for tomorrow
+        if scheduled_time < now:
+            scheduled_time += timedelta(days=1)
 
         # Check for recurrence
         recurrence_type = 'once'
@@ -146,45 +132,49 @@ class TelexWebhookView(APIView):
             recurrence_type = 'birthday'
         elif 'anniversary' in text.lower():
             recurrence_type = 'anniversary'
+        elif 'employment' in text.lower():
+            recurrence_type = 'employment'
 
         # Create scheduled email
-        email_obj = ScheduledEmail.objects.create(
-            user=user,
-            recipient_email=recipient_email,
-            subject='Scheduled Message',
-            content=content,
-            email_header=email_header,
-            scheduled_time=scheduled_time,
-            recurrence_type=recurrence_type,
-            next_send=scheduled_time
-        )
+        try:
+            email_obj = ScheduledEmail.objects.create(
+                user=user,
+                recipient_email=recipient_email,
+                subject='Scheduled Message',
+                content=content,
+                email_header=email_header,
+                scheduled_time=scheduled_time,
+                recurrence_type=recurrence_type,
+                next_send=scheduled_time
+            )
 
-        # Schedule task
-        send_scheduled_email.apply_async(
-            args=[email_obj.id],
-            eta=scheduled_time
-        )
+            # Schedule task
+            send_scheduled_email.apply_async(
+                args=[email_obj.id],
+                eta=scheduled_time
+            )
 
-        # Send confirmation
-        recurrence_text = f" ({recurrence_type})" if recurrence_type != 'once' else ""
-        confirmation = (
-            f"✅ Email scheduled!\n"
-            f"📧 To: {recipient_email}\n"
-            f"📝 Message: {content}\n"
-            f"⏰ Time: {scheduled_time.strftime('%A, %B %d at %I:%M %p %Z')}{recurrence_text}\n"
-            f"🎯 Header: {email_header}"
-        )
-        
-        return self.send_telex_message(channel_id, confirmation)
+            # Send confirmation
+            recurrence_text = f" ({recurrence_type})" if recurrence_type != 'once' else ""
+            confirmation = (
+                f"✅ Email scheduled!\n"
+                f"📧 To: {recipient_email}\n"
+                f"📝 Message: {content}\n"
+                f"⏰ Time: {scheduled_time.strftime('%A, %B %d at %I:%M %p %Z')}{recurrence_text}\n"
+                f"🎯 Header: {email_header}"
+            )
+            return confirmation
+            
+        except Exception as e:
+            return f"❌ Error scheduling email: {str(e)}"
 
-    def process_list_command(self, user, channel_id):
+    def process_list_command(self, user):
         """List all scheduled emails"""
         
         emails = ScheduledEmail.objects.filter(user=user, is_active=True)
         
         if not emails.exists():
-            response_text = "📭 No scheduled emails yet."
-            return self.send_telex_message(channel_id, response_text)
+            return "📭 No scheduled emails yet."
 
         message = "📋 Your Scheduled Emails:\n\n"
         for i, email in enumerate(emails, 1):
@@ -197,9 +187,9 @@ class TelexWebhookView(APIView):
                 f"   ID: {email.id}\n\n"
             )
 
-        return self.send_telex_message(channel_id, message)
+        return message
 
-    def process_cancel_command(self, user, text, channel_id):
+    def process_cancel_command(self, user, text):
         """
         Cancel a scheduled email
         Example: /cancel 5
@@ -207,8 +197,7 @@ class TelexWebhookView(APIView):
         
         match = re.search(r'/cancel\s+(\d+)', text)
         if not match:
-            response_text = "❌ Use format: /cancel EMAIL_ID"
-            return self.send_telex_message(channel_id, response_text)
+            return "❌ Use format: /cancel EMAIL_ID"
 
         email_id = int(match.group(1))
         
@@ -216,32 +205,32 @@ class TelexWebhookView(APIView):
             email = ScheduledEmail.objects.get(id=email_id, user=user)
             email.is_active = False
             email.save()
-            
-            response_text = f"✅ Email '{email.subject}' has been cancelled."
-            return self.send_telex_message(channel_id, response_text)
+            return f"✅ Email '{email.subject}' has been cancelled."
         except ScheduledEmail.DoesNotExist:
-            response_text = "❌ Email not found."
-            return self.send_telex_message(channel_id, response_text)
+            return "❌ Email not found."
 
-    def send_help_message(self, channel_id):
+    def get_help_message(self):
         """Send help message"""
         
         help_text = (
             "📚 **Scheduled Email Bot Help**\n\n"
-            "Commands:\n"
+            "**Commands:**\n"
             "/schedule \"message\" to email@domain.com at 2pm with header \"Header\"\n"
             "/list - Show all scheduled emails\n"
-            "/cancel EMAIL_ID - Cancel a scheduled email\n\n"
-            "Recurrence options (add to /schedule):\n"
+            "/cancel EMAIL_ID - Cancel a scheduled email\n"
+            "/help - Show this help message\n\n"
+            "**Recurrence options (add to /schedule):**\n"
             "- daily, weekly, monthly, yearly\n"
             "- birthday, anniversary, employment\n\n"
-            "Example:\n"
-            "/schedule \"Don't forget the meeting\" to me@email.com at 9am daily with header \"Reminder\""
+            "**Example:**\n"
+            "/schedule \"Don't forget the meeting\" to me@email.com at 9am daily with header \"Reminder\"\n\n"
+            "**Casual Chat:**\n"
+            "Try saying: Hi, How are you?, Inspire me, What can you do?"
         )
         
-        return self.send_telex_message(channel_id, help_text)
+        return help_text
 
-    def process_natural_language(self, user, text, channel_id):
+    def process_natural_language(self, user, text):
         """
         Handle natural language input & casual conversation
         Supports both scheduling requests and friendly chat
@@ -252,33 +241,27 @@ class TelexWebhookView(APIView):
         # Greeting responses
         greetings = ['hi', 'hello', 'hey', 'greetings', 'howdy']
         if any(greeting in text_lower for greeting in greetings):
-            response = self.get_greeting_response(user.first_name or user.username)
-            return self.send_telex_message(channel_id, response)
+            return self.get_greeting_response(user.first_name or user.username)
         
         # How are you questions
         if any(phrase in text_lower for phrase in ['how are you', 'how are u', 'how do you do', 'how you doing']):
-            response = self.get_how_are_you_response()
-            return self.send_telex_message(channel_id, response)
+            return self.get_how_are_you_response()
         
         # Day/week questions
         if any(phrase in text_lower for phrase in ['how is your day', 'how\'s your day', 'how is your week']):
-            response = self.get_day_response()
-            return self.send_telex_message(channel_id, response)
+            return self.get_day_response()
         
         # What can you do
         if any(phrase in text_lower for phrase in ['what can you do', 'what do you do', 'capabilities', 'features']):
-            response = self.get_capabilities_response()
-            return self.send_telex_message(channel_id, response)
+            return self.get_capabilities_response()
         
         # Inspirational/quote requests
         if any(phrase in text_lower for phrase in ['quote', 'inspire', 'motivation', 'motivate me']):
-            response = self.get_quote()
-            return self.send_telex_message(channel_id, response)
+            return self.get_quote()
         
         # Thank you responses
         if any(phrase in text_lower for phrase in ['thank you', 'thanks', 'appreciate', 'cheers']):
-            response = self.get_thank_you_response()
-            return self.send_telex_message(channel_id, response)
+            return self.get_thank_you_response()
         
         # Default helpful response
         response_text = (
@@ -290,11 +273,10 @@ class TelexWebhookView(APIView):
             "Or just say hi! I'm here to help. 😊"
         )
         
-        return self.send_telex_message(channel_id, response_text)
+        return response_text
     
     def get_greeting_response(self, name):
         """Friendly greeting responses"""
-        import random
         
         greetings = [
             f"Hey {name}! 👋 Great to see you! How can I help you schedule something today?",
@@ -307,7 +289,6 @@ class TelexWebhookView(APIView):
     
     def get_how_are_you_response(self):
         """Response to 'how are you'"""
-        import random
         
         responses = [
             "I'm doing great, thanks for asking! 😊 I'm here and ready to help you schedule emails. How are *you* doing?",
@@ -320,8 +301,6 @@ class TelexWebhookView(APIView):
     
     def get_day_response(self):
         """Response to 'how is your day'"""
-        import random
-        from datetime import datetime
         
         hour = datetime.now().hour
         
@@ -342,7 +321,6 @@ class TelexWebhookView(APIView):
     
     def get_quote(self):
         """Inspirational quotes"""
-        import random
         
         quotes = [
             "✨ \"The future depends on what you do today.\" - Mahatma Gandhi",
@@ -360,7 +338,6 @@ class TelexWebhookView(APIView):
     
     def get_thank_you_response(self):
         """Response to thanks/appreciation"""
-        import random
         
         responses = [
             "You're welcome! 😊 Happy to help anytime. Need anything else?",
@@ -387,43 +364,3 @@ class TelexWebhookView(APIView):
             "What would you like to do? 😊"
         )
         return response
-
-    def send_telex_message(self, channel_id, message_text):
-        """Send message back to Telex channel"""
-        
-        import requests
-        
-        # TODO: Get your Telex.im API token from https://app.telex.im/settings
-        TELEX_API_TOKEN = 'your-telex-api-token'
-        TELEX_API_URL = 'https://api.telex.im/v1'
-
-        try:
-            response = requests.post(
-                f'{TELEX_API_URL}/channels/{channel_id}/messages',
-                headers={
-                    'Authorization': f'Bearer {TELEX_API_TOKEN}',
-                    'Content-Type': 'application/json'
-                },
-                json={
-                    'text': message_text,
-                    'type': 'text'
-                },
-                timeout=10
-            )
-
-            if response.status_code == 200:
-                return Response({
-                    'status': 'success',
-                    'message': 'Message sent to Telex'
-                }, status=status.HTTP_200_OK)
-            else:
-                return Response({
-                    'status': 'error',
-                    'message': f'Failed to send message: {response.text}'
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-        except Exception as e:
-            return Response({
-                'status': 'error',
-                'message': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
