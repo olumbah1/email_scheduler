@@ -13,7 +13,7 @@
       "position": [816, -112],
       "type": "a2a/custom-a2a-node",
       "typeVersion": 1,
-      "url": "https://your-railway-domain.com/api/telex/webhook/"
+      "url": "https://emailscheduler-Olumbah.replit.dev/api/telex/webhook/"
     }
   ],
   "pinData": {},
