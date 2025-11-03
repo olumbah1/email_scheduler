@@ -86,25 +86,25 @@ WSGI_APPLICATION = 'email_scheduler.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME', 'property'),       
-        'USER': os.getenv('DB_USER', 'postgres'),  
-        'PASSWORD': os.getenv('DB_PASSWORD', ''),  
-        'HOST': os.getenv('DB_HOST', '127.0.0.1'), 
-        'PORT': os.getenv('DB_PORT', '5432'),      
-    }
-}
-
-
-
 # DATABASES = {
 #     'default': {
-#         'ENGINE': 'django.db.backends.sqlite3',
-#         'NAME': BASE_DIR / 'db.sqlite3',
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': os.getenv('DB_NAME', 'property'),       
+#         'USER': os.getenv('DB_USER', 'postgres'),  
+#         'PASSWORD': os.getenv('DB_PASSWORD', ''),  
+#         'HOST': os.getenv('DB_HOST', '127.0.0.1'), 
+#         'PORT': os.getenv('DB_PORT', '5432'),      
 #     }
 # }
+
+
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
+}
 
 
 # Password validation
